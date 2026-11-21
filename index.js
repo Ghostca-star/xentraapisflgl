@@ -1,12 +1,12 @@
+// Simpan sebagai app.js
+// Jalanin: node app.js https://sfl.gl/xxx
+// Atau:    node app.js https://sub2unlock.io/xxx
+
 const crypto = require('crypto');
 
-// ==========================================
-// KONFIGURASI GLOBAL
-// ==========================================
 const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
 const APP_KHADDAVI = "https://app.khaddavi.net";
 
-// Polyfill Node.js
 if (!globalThis.crypto) globalThis.crypto = crypto.webcrypto;
 if (!globalThis.btoa) globalThis.btoa = (str) => Buffer.from(str, 'binary').toString('base64');
 
@@ -141,9 +141,9 @@ async function bypassSfl(input) {
 }
 
 // ==========================================
-// ENGINE 2: SUB2UNLOCK
+// ENGINE 2: SUB2UNLOCK & SUB4UNLOCK (FIXED)
 // ==========================================
-async function bypassSub2Unlock(inputUrl) {
+async function bypassSubUnlock(inputUrl) {
     const response = await fetch(inputUrl, {
         headers: {
             "user-agent": UA,
@@ -156,17 +156,15 @@ async function bypassSub2Unlock(inputUrl) {
     
     const html = await response.text();
     
-    // Blacklist resource & internal domain
     const blacklist = [
         "fonts.googleapis.com", "fonts.gstatic.com", "cdnjs.cloudflare.com",
         "google.com", "googleapis.com", "gstatic.com", "cloudflare.com",
         "bootstrapcdn.com", "jquery.com", "w3.org", "schema.org",
-        "sub2unlock", "link2unlock"
+        "sub2unlock", "sub4unlock", "link2unlock"
     ];
 
     const isClean = (url) => !blacklist.some(b => url.includes(b));
 
-    // Prioritas 1: class="get-link"
     let matches = html.match(/<a[^>]+class=["'][^"']*get-link[^"']*["'][^>]+href=["']([^"']+)["']/gi);
     if (matches) {
         for (let m of matches) {
@@ -175,7 +173,6 @@ async function bypassSub2Unlock(inputUrl) {
         }
     }
     
-    // Prioritas 2: href sebelum class
     matches = html.match(/<a[^>]+href=["']([^"']+)["'][^>]+class=["'][^"']*get-link[^"']*["']/gi);
     if (matches) {
         for (let m of matches) {
@@ -184,68 +181,52 @@ async function bypassSub2Unlock(inputUrl) {
         }
     }
 
-    // Prioritas 3: Semua link eksternal
     matches = html.match(/href=["'](https?:\/\/[^"']+)["']/gi);
     if (matches) {
         for (let m of matches) {
             let link = m.match(/href=["']([^"']+)["']/i);
-            if (link && isClean(link[1])) return link[1].replace(/&amp;/g, '&');
+            if (link && isClean(link[1])) {
+                return link[1].replace(/&amp;/g, '&');
+            }
         }
     }
 
-    throw new Error("Link target tidak ditemukan di halaman sub2unlock.");
+    throw new Error("Link target asli tidak ditemukan di HTML statis. Kemungkinan target butuh eksekusi JavaScript/social action.");
 }
 
 // ==========================================
-// HANDLER VERCEL (ROOT ENDPOINT)
+// CLI RUNNER
 // ==========================================
-module.exports = async (req, res) => {
-    // Set CORS
-    res.setHeader("Access-Control-Allow-Origin", "*");
-    res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
-    res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
-
-    if (req.method === "OPTIONS") return res.status(200).end();
-
-    // Ambil parameter
-    let targetUrl = req.query.url;
-    if (req.method === "POST" && req.body) {
-        targetUrl = req.body.url || targetUrl;
+(async () => {
+    const url = process.argv[2];
+    if (!url) {
+        console.log("Usage: node app.js <URL>");
+        console.log("Contoh: node app.js https://sfl.gl/GnE1");
+        console.log("        node app.js https://sub2unlock.io/1aFLf");
+        process.exit(1);
     }
 
-    if (!targetUrl) {
-        return res.status(400).json({ 
-            status: "error", 
-            message: "Parameter 'url' wajib diisi. (Gunakan ?url=...)" 
-        });
-    }
+    let mode = "auto";
+    if (url.includes("sfl.gl")) mode = "sfl";
+    else if (url.includes("sub2unlock") || url.includes("sub4unlock")) mode = "unlock";
+
+    console.log(`[*] Mode: ${mode.toUpperCase()}`);
+    console.log(`[*] Target: ${url}`);
+    console.log(`[*] Memproses...\n`);
 
     try {
-        let finalUrl;
-        let mode = "auto";
-
-        // Auto-detect mode
-        if (targetUrl.includes("sfl.gl")) {
-            mode = "sfl";
-            finalUrl = await bypassSfl(targetUrl);
-        } else if (targetUrl.includes("sub2unlock")) {
-            mode = "sub2unlock";
-            finalUrl = await bypassSub2Unlock(targetUrl);
+        let result;
+        if (mode === "sfl") {
+            result = await bypassSfl(url);
+        } else if (mode === "unlock") {
+            result = await bypassSubUnlock(url);
         } else {
-            return res.status(400).json({ 
-                status: "error", 
-                message: "Domain tidak didukung. Hanya sfl.gl & sub2unlock.io" 
-            });
+            throw new Error("Domain tidak dikenal. Gunakan sfl.gl, sub2unlock.io, atau sub4unlock.co");
         }
 
-        return res.json({
-            status: "success",
-            mode: mode,
-            original: targetUrl,
-            bypass: finalUrl
-        });
-
-    } catch (err) {
-        return res.status(500).json({ status: "error", message: err.message });
+        console.log(`[✓] BERHASIL!`);
+        console.log(`[✓] TARGET URL: ${result}`);
+    } catch (error) {
+        console.error(`[!] GAGAL: ${error.message}`);
     }
-};
+})();
