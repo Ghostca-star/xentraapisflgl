@@ -6,7 +6,6 @@ const crypto = require('crypto');
 const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
 const APP = "https://app.khaddavi.net";
 
-// Polyfill Node.js
 if (!globalThis.crypto) globalThis.crypto = crypto.webcrypto;
 if (!globalThis.btoa) globalThis.btoa = (str) => Buffer.from(str, 'binary').toString('base64');
 
@@ -38,35 +37,42 @@ async function makeToken(xsrf) {
 }
 
 // ==========================================
-// CORE LOGIC: BYPASS
+// CORE LOGIC: BYPASS SFL
 // ==========================================
-async function bypassSfl(input) {
+async function bypassSfl(input, log) {
     const code = String(input || "").trim()
         .replace(/^https?:\/\//i, "")
         .replace(/^(www\.)?sfl\.gl\//i, "")
         .replace(/\/+$/, "");
-        
+
     if (!code) throw new Error("Kode/URL sfl.gl tidak valid");
 
     const jar = new CookieJar();
     const req = async (url, opts = {}) => {
+        log.push(`[fetch] ${opts.method || 'GET'} ${url}`);
         const res = await fetch(url, {
             ...opts,
             redirect: "manual",
             headers: { "user-agent": UA, ...opts.headers }
         });
+        log.push(`[resp] ${res.status} | loc: ${res.headers.get('location') || '-'}`);
         jar.save(res);
         return res;
     };
 
-    let res = await req(`https://sfl.gl/${encodeURIComponent(code)}`, { headers: { accept: "application/json, text/html" } });
+    // STEP 1: hit sfl.gl
+    let res = await req(`https://sfl.gl/${encodeURIComponent(code)}`, {
+        headers: { accept: "application/json, text/html" }
+    });
     let text = await res.text();
-    
+    log.push(`[body-preview] ${text.slice(0, 200)}`);
+
     let url, ray_id;
     try {
         const data = JSON.parse(text);
         url = data.url;
         ray_id = data.ray_id;
+        log.push(`[json] url=${url} ray_id=${ray_id}`);
     } catch (e) {}
 
     if (!url || !ray_id) {
@@ -75,34 +81,54 @@ async function bypassSfl(input) {
         if (mForm && mRay) {
             url = mForm[1];
             ray_id = mRay[1];
+            log.push(`[form] url=${url} ray_id=${ray_id}`);
         }
     }
 
     if (!url || !ray_id) throw new Error("Gagal mendapatkan url/ray_id dari sfl.gl");
 
+    // STEP 2: redirect.php
     res = await req(`${url}?ray_id=${ray_id}`, { headers: { cookie: jar.getHeader() } });
     let loc = res.headers.get("location");
-    if (!loc) throw new Error("redirect.php tidak mengembalikan location");
+    if (!loc) {
+        const body2 = await res.text();
+        log.push(`[redirect-body] ${body2.slice(0, 300)}`);
+        throw new Error("redirect.php tidak mengembalikan location");
+    }
     let slug = new URL(loc, APP).href;
+    log.push(`[slug] ${slug}`);
 
+    // STEP 3: handshake
     const handshake = async (page) => {
-        let view = await req(page, { headers: { cookie: jar.getHeader() } });
+        await req(page, { headers: { cookie: jar.getHeader() } });
         let xsrf_raw = jar.get("XSRF-TOKEN") || "";
+        log.push(`[xsrf] ${xsrf_raw ? xsrf_raw.slice(0, 20) + '...' : 'TIDAK ADA'}`);
         if (!xsrf_raw) throw new Error("XSRF-TOKEN tidak ditemukan");
 
         let token = await makeToken(decodeURIComponent(xsrf_raw));
         let s = await req(APP + "/api/session", {
             method: "POST",
-            headers: { cookie: jar.getHeader(), "content-type": "application/json", origin: APP, referer: page },
+            headers: {
+                cookie: jar.getHeader(),
+                "content-type": "application/json",
+                origin: APP,
+                referer: page
+            },
             body: JSON.stringify({ _token: token })
         });
         let sdata = await s.json().catch(() => ({}));
+        log.push(`[session] ${JSON.stringify(sdata).slice(0, 100)}`);
         if (sdata.captcha || sdata.passcode) throw new Error("Shortlink butuh captcha/passcode manual");
 
         const api = async (path, body) => {
             return req(APP + path, {
                 method: "POST",
-                headers: { cookie: jar.getHeader(), "content-type": "application/json", origin: APP, referer: page },
+                headers: {
+                    cookie: jar.getHeader(),
+                    "content-type": "application/json",
+                    origin: APP,
+                    referer: page
+                },
                 body: JSON.stringify(body)
             });
         };
@@ -110,32 +136,41 @@ async function bypassSfl(input) {
     };
 
     let stage = await handshake(slug);
+    log.push(`[stage] step=${stage.step}`);
 
     if (stage.step !== 2) {
         let verify = await stage.api("/api/verify", { _a: 0 });
         let vdata = await verify.json().catch(() => ({}));
+        log.push(`[verify] ${JSON.stringify(vdata).slice(0, 100)}`);
         if (!vdata.target) throw new Error("Gagal verifikasi shortlink");
-        
-        res = await req(new URL(vdata.target, APP).href, { headers: { cookie: jar.getHeader(), referer: slug } });
+
+        res = await req(new URL(vdata.target, APP).href, {
+            headers: { cookie: jar.getHeader(), referer: slug }
+        });
         loc = res.headers.get("location");
         if (!loc) throw new Error("Verify tidak mengembalikan location");
-        
+
         slug = new URL(loc, APP).href;
+        log.push(`[slug2] ${slug}`);
         stage = await handshake(slug);
     }
 
+    // STEP 4: go
     let go = await stage.api("/api/go", { key: 42, size: "1600.900", ado: null });
     let gdata = await go.json().catch(() => ({}));
+    log.push(`[go] ${JSON.stringify(gdata).slice(0, 100)}`);
     let landing = gdata.url || gdata.target;
     if (!landing) throw new Error("Gagal mendapatkan URL tujuan");
 
+    // STEP 5: final redirect
     let final = await req(landing, { headers: { cookie: jar.getHeader(), referer: slug } });
     let finalLoc = final.headers.get("location");
     if (finalLoc) return new URL(finalLoc, landing).href;
 
     let body = await final.text();
-    let match = body.match(/location\.href\s*=\s*["']([^"']+)["']/) || body.match(/location\.replace\(\s*["']([^"']+)["']/);
-    
+    let match = body.match(/location\.href\s*=\s*["']([^"']+)["']/) ||
+                body.match(/location\.replace\(\s*["']([^"']+)["']/);
+
     if (match) return match[1].replace(/\\\//g, "/");
     return landing;
 }
@@ -144,14 +179,12 @@ async function bypassSfl(input) {
 // HANDLER VERCEL
 // ==========================================
 module.exports = async (req, res) => {
-    // CORS biar bisa diakses dari mana aja
     res.setHeader("Access-Control-Allow-Origin", "*");
     res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
     res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
 
     if (req.method === "OPTIONS") return res.status(200).end();
 
-    // Ambil Target URL
     let targetUrl = req.query.url;
     if (req.method === "POST" && req.body) targetUrl = req.body.url || targetUrl;
 
@@ -159,15 +192,21 @@ module.exports = async (req, res) => {
         return res.status(400).json({ status: "error", message: "Parameter 'url' wajib diisi" });
     }
 
-    // Eksekusi
+    const log = [];
+
     try {
-        const finalUrl = await bypassSfl(targetUrl);
+        const finalUrl = await bypassSfl(targetUrl, log);
         return res.json({
             status: "success",
             original: targetUrl,
-            bypass: finalUrl
+            bypass: finalUrl,
+            debug: log
         });
     } catch (err) {
-        return res.status(500).json({ status: "error", message: err.message });
+        return res.status(500).json({
+            status: "error",
+            message: err.message,
+            debug: log
+        });
     }
 };
