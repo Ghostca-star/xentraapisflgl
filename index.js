@@ -11,7 +11,7 @@ if (!globalThis.crypto) globalThis.crypto = crypto.webcrypto;
 if (!globalThis.btoa) globalThis.btoa = (str) => Buffer.from(str, 'binary').toString('base64');
 
 // ==========================================
-// HELPER: COOKIE JAR (Buat sfl.gl)
+// HELPER: COOKIE JAR (Khusus SFL)
 // ==========================================
 class CookieJar {
     constructor() { this.jar = {}; }
@@ -29,9 +29,6 @@ class CookieJar {
     get(key) { return this.jar[key]; }
 }
 
-// ==========================================
-// HELPER: TOKEN XSRF (Buat sfl.gl)
-// ==========================================
 async function makeToken(xsrf) {
     const fp = "webgl:1||audio:1||canvas:1||fonts:1||system:1||env:1||network:1";
     const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(fp));
@@ -144,9 +141,9 @@ async function bypassSfl(input) {
 }
 
 // ==========================================
-// ENGINE 2: SUB2UNLOCK & SUB4UNLOCK
+// ENGINE 2: SUB2UNLOCK
 // ==========================================
-async function bypassSubUnlock(inputUrl) {
+async function bypassSub2Unlock(inputUrl) {
     const response = await fetch(inputUrl, {
         headers: {
             "user-agent": UA,
@@ -159,23 +156,44 @@ async function bypassSubUnlock(inputUrl) {
     
     const html = await response.text();
     
-    let match = html.match(/<a[^>]+class=["'][^"']*get-link[^"']*["'][^>]+href=["']([^"']+)["']/i);
-    
-    if (!match) {
-        match = html.match(/<a[^>]+href=["']([^"']+)["'][^>]+class=["'][^"']*get-link[^"']*["']/i);
+    // Blacklist resource & internal domain
+    const blacklist = [
+        "fonts.googleapis.com", "fonts.gstatic.com", "cdnjs.cloudflare.com",
+        "google.com", "googleapis.com", "gstatic.com", "cloudflare.com",
+        "bootstrapcdn.com", "jquery.com", "w3.org", "schema.org",
+        "sub2unlock", "link2unlock"
+    ];
+
+    const isClean = (url) => !blacklist.some(b => url.includes(b));
+
+    // Prioritas 1: class="get-link"
+    let matches = html.match(/<a[^>]+class=["'][^"']*get-link[^"']*["'][^>]+href=["']([^"']+)["']/gi);
+    if (matches) {
+        for (let m of matches) {
+            let link = m.match(/href=["']([^"']+)["']/i);
+            if (link && isClean(link[1])) return link[1].replace(/&amp;/g, '&');
+        }
     }
     
-    if (!match) {
-        match = html.match(/href=["'](https?:\/\/(?!sub2unlock|sub4unlock|link2unlock)[^"']+)["']/i);
+    // Prioritas 2: href sebelum class
+    matches = html.match(/<a[^>]+href=["']([^"']+)["'][^>]+class=["'][^"']*get-link[^"']*["']/gi);
+    if (matches) {
+        for (let m of matches) {
+            let link = m.match(/href=["']([^"']+)["']/i);
+            if (link && isClean(link[1])) return link[1].replace(/&amp;/g, '&');
+        }
     }
 
-    if (!match) {
-        match = html.match(/http-equiv=["']refresh["'][^>]+content=["'][^"']*url=([^"']+)["']/i);
+    // Prioritas 3: Semua link eksternal
+    matches = html.match(/href=["'](https?:\/\/[^"']+)["']/gi);
+    if (matches) {
+        for (let m of matches) {
+            let link = m.match(/href=["']([^"']+)["']/i);
+            if (link && isClean(link[1])) return link[1].replace(/&amp;/g, '&');
+        }
     }
 
-    if (!match) throw new Error("Gagal menemukan URL target di halaman unlock");
-    
-    return match[1].replace(/&amp;/g, '&');
+    throw new Error("Link target tidak ditemukan di halaman sub2unlock.");
 }
 
 // ==========================================
@@ -191,11 +209,8 @@ module.exports = async (req, res) => {
 
     // Ambil parameter
     let targetUrl = req.query.url;
-    let mode = req.query.mode; // Bisa diisi: sfl, sub2unlock, sub4unlock
-
     if (req.method === "POST" && req.body) {
         targetUrl = req.body.url || targetUrl;
-        mode = req.body.mode || mode;
     }
 
     if (!targetUrl) {
@@ -207,22 +222,20 @@ module.exports = async (req, res) => {
 
     try {
         let finalUrl;
-        
-        // AUTO-DETECT MODE (Kalau mode nggak ditulis di URL)
-        if (!mode) {
-            if (targetUrl.includes("sfl.gl")) mode = "sfl";
-            else if (targetUrl.includes("sub2unlock.io")) mode = "sub2unlock";
-            else if (targetUrl.includes("sub4unlock.co")) mode = "sub4unlock";
-            else mode = "sfl"; // Default fallback
-        }
+        let mode = "auto";
 
-        // Routing berdasarkan mode
-        if (mode === "sfl") {
+        // Auto-detect mode
+        if (targetUrl.includes("sfl.gl")) {
+            mode = "sfl";
             finalUrl = await bypassSfl(targetUrl);
-        } else if (mode === "sub2unlock" || mode === "sub4unlock") {
-            finalUrl = await bypassSubUnlock(targetUrl);
+        } else if (targetUrl.includes("sub2unlock")) {
+            mode = "sub2unlock";
+            finalUrl = await bypassSub2Unlock(targetUrl);
         } else {
-            return res.status(400).json({ status: "error", message: "Mode tidak dikenal. Pilih: sfl, sub2unlock, sub4unlock" });
+            return res.status(400).json({ 
+                status: "error", 
+                message: "Domain tidak didukung. Hanya sfl.gl & sub2unlock.io" 
+            });
         }
 
         return res.json({
