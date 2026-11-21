@@ -1,17 +1,17 @@
-// Simpan sebagai app.js
-// Jalanin: node app.js https://sfl.gl/xxx
-// Atau:    node app.js https://sub2unlock.io/xxx
-
 const crypto = require('crypto');
 
+// ==========================================
+// KONFIGURASI
+// ==========================================
 const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
-const APP_KHADDAVI = "https://app.khaddavi.net";
+const APP = "https://app.khaddavi.net";
 
+// Polyfill Node.js
 if (!globalThis.crypto) globalThis.crypto = crypto.webcrypto;
 if (!globalThis.btoa) globalThis.btoa = (str) => Buffer.from(str, 'binary').toString('base64');
 
 // ==========================================
-// HELPER: COOKIE JAR (Khusus SFL)
+// HELPER
 // ==========================================
 class CookieJar {
     constructor() { this.jar = {}; }
@@ -38,7 +38,7 @@ async function makeToken(xsrf) {
 }
 
 // ==========================================
-// ENGINE 1: SFL.GL
+// CORE LOGIC: BYPASS
 // ==========================================
 async function bypassSfl(input) {
     const code = String(input || "").trim()
@@ -83,7 +83,7 @@ async function bypassSfl(input) {
     res = await req(`${url}?ray_id=${ray_id}`, { headers: { cookie: jar.getHeader() } });
     let loc = res.headers.get("location");
     if (!loc) throw new Error("redirect.php tidak mengembalikan location");
-    let slug = new URL(loc, APP_KHADDAVI).href;
+    let slug = new URL(loc, APP).href;
 
     const handshake = async (page) => {
         let view = await req(page, { headers: { cookie: jar.getHeader() } });
@@ -91,18 +91,18 @@ async function bypassSfl(input) {
         if (!xsrf_raw) throw new Error("XSRF-TOKEN tidak ditemukan");
 
         let token = await makeToken(decodeURIComponent(xsrf_raw));
-        let s = await req(APP_KHADDAVI + "/api/session", {
+        let s = await req(APP + "/api/session", {
             method: "POST",
-            headers: { cookie: jar.getHeader(), "content-type": "application/json", origin: APP_KHADDAVI, referer: page },
+            headers: { cookie: jar.getHeader(), "content-type": "application/json", origin: APP, referer: page },
             body: JSON.stringify({ _token: token })
         });
         let sdata = await s.json().catch(() => ({}));
         if (sdata.captcha || sdata.passcode) throw new Error("Shortlink butuh captcha/passcode manual");
 
         const api = async (path, body) => {
-            return req(APP_KHADDAVI + path, {
+            return req(APP + path, {
                 method: "POST",
-                headers: { cookie: jar.getHeader(), "content-type": "application/json", origin: APP_KHADDAVI, referer: page },
+                headers: { cookie: jar.getHeader(), "content-type": "application/json", origin: APP, referer: page },
                 body: JSON.stringify(body)
             });
         };
@@ -116,11 +116,11 @@ async function bypassSfl(input) {
         let vdata = await verify.json().catch(() => ({}));
         if (!vdata.target) throw new Error("Gagal verifikasi shortlink");
         
-        res = await req(new URL(vdata.target, APP_KHADDAVI).href, { headers: { cookie: jar.getHeader(), referer: slug } });
+        res = await req(new URL(vdata.target, APP).href, { headers: { cookie: jar.getHeader(), referer: slug } });
         loc = res.headers.get("location");
         if (!loc) throw new Error("Verify tidak mengembalikan location");
         
-        slug = new URL(loc, APP_KHADDAVI).href;
+        slug = new URL(loc, APP).href;
         stage = await handshake(slug);
     }
 
@@ -141,92 +141,33 @@ async function bypassSfl(input) {
 }
 
 // ==========================================
-// ENGINE 2: SUB2UNLOCK & SUB4UNLOCK (FIXED)
+// HANDLER VERCEL
 // ==========================================
-async function bypassSubUnlock(inputUrl) {
-    const response = await fetch(inputUrl, {
-        headers: {
-            "user-agent": UA,
-            "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            "accept-language": "en-US,en;q=0.9",
-        }
-    });
+module.exports = async (req, res) => {
+    // CORS biar bisa diakses dari mana aja
+    res.setHeader("Access-Control-Allow-Origin", "*");
+    res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+    res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
 
-    if (!response.ok) throw new Error(`HTTP ${response.status} saat fetch target`);
-    
-    const html = await response.text();
-    
-    const blacklist = [
-        "fonts.googleapis.com", "fonts.gstatic.com", "cdnjs.cloudflare.com",
-        "google.com", "googleapis.com", "gstatic.com", "cloudflare.com",
-        "bootstrapcdn.com", "jquery.com", "w3.org", "schema.org",
-        "sub2unlock", "sub4unlock", "link2unlock"
-    ];
+    if (req.method === "OPTIONS") return res.status(200).end();
 
-    const isClean = (url) => !blacklist.some(b => url.includes(b));
+    // Ambil Target URL
+    let targetUrl = req.query.url;
+    if (req.method === "POST" && req.body) targetUrl = req.body.url || targetUrl;
 
-    let matches = html.match(/<a[^>]+class=["'][^"']*get-link[^"']*["'][^>]+href=["']([^"']+)["']/gi);
-    if (matches) {
-        for (let m of matches) {
-            let link = m.match(/href=["']([^"']+)["']/i);
-            if (link && isClean(link[1])) return link[1].replace(/&amp;/g, '&');
-        }
-    }
-    
-    matches = html.match(/<a[^>]+href=["']([^"']+)["'][^>]+class=["'][^"']*get-link[^"']*["']/gi);
-    if (matches) {
-        for (let m of matches) {
-            let link = m.match(/href=["']([^"']+)["']/i);
-            if (link && isClean(link[1])) return link[1].replace(/&amp;/g, '&');
-        }
+    if (!targetUrl) {
+        return res.status(400).json({ status: "error", message: "Parameter 'url' wajib diisi" });
     }
 
-    matches = html.match(/href=["'](https?:\/\/[^"']+)["']/gi);
-    if (matches) {
-        for (let m of matches) {
-            let link = m.match(/href=["']([^"']+)["']/i);
-            if (link && isClean(link[1])) {
-                return link[1].replace(/&amp;/g, '&');
-            }
-        }
-    }
-
-    throw new Error("Link target asli tidak ditemukan di HTML statis. Kemungkinan target butuh eksekusi JavaScript/social action.");
-}
-
-// ==========================================
-// CLI RUNNER
-// ==========================================
-(async () => {
-    const url = process.argv[2];
-    if (!url) {
-        console.log("Usage: node app.js <URL>");
-        console.log("Contoh: node app.js https://sfl.gl/GnE1");
-        console.log("        node app.js https://sub2unlock.io/1aFLf");
-        process.exit(1);
-    }
-
-    let mode = "auto";
-    if (url.includes("sfl.gl")) mode = "sfl";
-    else if (url.includes("sub2unlock") || url.includes("sub4unlock")) mode = "unlock";
-
-    console.log(`[*] Mode: ${mode.toUpperCase()}`);
-    console.log(`[*] Target: ${url}`);
-    console.log(`[*] Memproses...\n`);
-
+    // Eksekusi
     try {
-        let result;
-        if (mode === "sfl") {
-            result = await bypassSfl(url);
-        } else if (mode === "unlock") {
-            result = await bypassSubUnlock(url);
-        } else {
-            throw new Error("Domain tidak dikenal. Gunakan sfl.gl, sub2unlock.io, atau sub4unlock.co");
-        }
-
-        console.log(`[✓] BERHASIL!`);
-        console.log(`[✓] TARGET URL: ${result}`);
-    } catch (error) {
-        console.error(`[!] GAGAL: ${error.message}`);
+        const finalUrl = await bypassSfl(targetUrl);
+        return res.json({
+            status: "success",
+            original: targetUrl,
+            bypass: finalUrl
+        });
+    } catch (err) {
+        return res.status(500).json({ status: "error", message: err.message });
     }
-})();
+};
