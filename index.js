@@ -1,17 +1,17 @@
 const crypto = require('crypto');
 
 // ==========================================
-// KONFIGURASI
+// KONFIGURASI GLOBAL
 // ==========================================
 const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
-const APP = "https://app.khaddavi.net";
+const APP_KHADDAVI = "https://app.khaddavi.net";
 
 // Polyfill Node.js
 if (!globalThis.crypto) globalThis.crypto = crypto.webcrypto;
 if (!globalThis.btoa) globalThis.btoa = (str) => Buffer.from(str, 'binary').toString('base64');
 
 // ==========================================
-// HELPER
+// HELPER: COOKIE JAR (Buat sfl.gl)
 // ==========================================
 class CookieJar {
     constructor() { this.jar = {}; }
@@ -29,6 +29,9 @@ class CookieJar {
     get(key) { return this.jar[key]; }
 }
 
+// ==========================================
+// HELPER: TOKEN XSRF (Buat sfl.gl)
+// ==========================================
 async function makeToken(xsrf) {
     const fp = "webgl:1||audio:1||canvas:1||fonts:1||system:1||env:1||network:1";
     const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(fp));
@@ -38,7 +41,7 @@ async function makeToken(xsrf) {
 }
 
 // ==========================================
-// CORE LOGIC: BYPASS
+// ENGINE 1: SFL.GL
 // ==========================================
 async function bypassSfl(input) {
     const code = String(input || "").trim()
@@ -83,7 +86,7 @@ async function bypassSfl(input) {
     res = await req(`${url}?ray_id=${ray_id}`, { headers: { cookie: jar.getHeader() } });
     let loc = res.headers.get("location");
     if (!loc) throw new Error("redirect.php tidak mengembalikan location");
-    let slug = new URL(loc, APP).href;
+    let slug = new URL(loc, APP_KHADDAVI).href;
 
     const handshake = async (page) => {
         let view = await req(page, { headers: { cookie: jar.getHeader() } });
@@ -91,18 +94,18 @@ async function bypassSfl(input) {
         if (!xsrf_raw) throw new Error("XSRF-TOKEN tidak ditemukan");
 
         let token = await makeToken(decodeURIComponent(xsrf_raw));
-        let s = await req(APP + "/api/session", {
+        let s = await req(APP_KHADDAVI + "/api/session", {
             method: "POST",
-            headers: { cookie: jar.getHeader(), "content-type": "application/json", origin: APP, referer: page },
+            headers: { cookie: jar.getHeader(), "content-type": "application/json", origin: APP_KHADDAVI, referer: page },
             body: JSON.stringify({ _token: token })
         });
         let sdata = await s.json().catch(() => ({}));
         if (sdata.captcha || sdata.passcode) throw new Error("Shortlink butuh captcha/passcode manual");
 
         const api = async (path, body) => {
-            return req(APP + path, {
+            return req(APP_KHADDAVI + path, {
                 method: "POST",
-                headers: { cookie: jar.getHeader(), "content-type": "application/json", origin: APP, referer: page },
+                headers: { cookie: jar.getHeader(), "content-type": "application/json", origin: APP_KHADDAVI, referer: page },
                 body: JSON.stringify(body)
             });
         };
@@ -116,11 +119,11 @@ async function bypassSfl(input) {
         let vdata = await verify.json().catch(() => ({}));
         if (!vdata.target) throw new Error("Gagal verifikasi shortlink");
         
-        res = await req(new URL(vdata.target, APP).href, { headers: { cookie: jar.getHeader(), referer: slug } });
+        res = await req(new URL(vdata.target, APP_KHADDAVI).href, { headers: { cookie: jar.getHeader(), referer: slug } });
         loc = res.headers.get("location");
         if (!loc) throw new Error("Verify tidak mengembalikan location");
         
-        slug = new URL(loc, APP).href;
+        slug = new URL(loc, APP_KHADDAVI).href;
         stage = await handshake(slug);
     }
 
@@ -141,32 +144,94 @@ async function bypassSfl(input) {
 }
 
 // ==========================================
-// HANDLER VERCEL
+// ENGINE 2: SUB2UNLOCK & SUB4UNLOCK
+// ==========================================
+async function bypassSubUnlock(inputUrl) {
+    const response = await fetch(inputUrl, {
+        headers: {
+            "user-agent": UA,
+            "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "accept-language": "en-US,en;q=0.9",
+        }
+    });
+
+    if (!response.ok) throw new Error(`HTTP ${response.status} saat fetch target`);
+    
+    const html = await response.text();
+    
+    let match = html.match(/<a[^>]+class=["'][^"']*get-link[^"']*["'][^>]+href=["']([^"']+)["']/i);
+    
+    if (!match) {
+        match = html.match(/<a[^>]+href=["']([^"']+)["'][^>]+class=["'][^"']*get-link[^"']*["']/i);
+    }
+    
+    if (!match) {
+        match = html.match(/href=["'](https?:\/\/(?!sub2unlock|sub4unlock|link2unlock)[^"']+)["']/i);
+    }
+
+    if (!match) {
+        match = html.match(/http-equiv=["']refresh["'][^>]+content=["'][^"']*url=([^"']+)["']/i);
+    }
+
+    if (!match) throw new Error("Gagal menemukan URL target di halaman unlock");
+    
+    return match[1].replace(/&amp;/g, '&');
+}
+
+// ==========================================
+// HANDLER VERCEL (ROOT ENDPOINT)
 // ==========================================
 module.exports = async (req, res) => {
-    // CORS biar bisa diakses dari mana aja
+    // Set CORS
     res.setHeader("Access-Control-Allow-Origin", "*");
     res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
     res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
 
     if (req.method === "OPTIONS") return res.status(200).end();
 
-    // Ambil Target URL
+    // Ambil parameter
     let targetUrl = req.query.url;
-    if (req.method === "POST" && req.body) targetUrl = req.body.url || targetUrl;
+    let mode = req.query.mode; // Bisa diisi: sfl, sub2unlock, sub4unlock
 
-    if (!targetUrl) {
-        return res.status(400).json({ status: "error", message: "Parameter 'url' wajib diisi" });
+    if (req.method === "POST" && req.body) {
+        targetUrl = req.body.url || targetUrl;
+        mode = req.body.mode || mode;
     }
 
-    // Eksekusi
+    if (!targetUrl) {
+        return res.status(400).json({ 
+            status: "error", 
+            message: "Parameter 'url' wajib diisi. (Gunakan ?url=...)" 
+        });
+    }
+
     try {
-        const finalUrl = await bypassSfl(targetUrl);
+        let finalUrl;
+        
+        // AUTO-DETECT MODE (Kalau mode nggak ditulis di URL)
+        if (!mode) {
+            if (targetUrl.includes("sfl.gl")) mode = "sfl";
+            else if (targetUrl.includes("sub2unlock.io")) mode = "sub2unlock";
+            else if (targetUrl.includes("sub4unlock.co")) mode = "sub4unlock";
+            else mode = "sfl"; // Default fallback
+        }
+
+        // Routing berdasarkan mode
+        if (mode === "sfl") {
+            finalUrl = await bypassSfl(targetUrl);
+        } else if (mode === "sub2unlock" || mode === "sub4unlock") {
+            finalUrl = await bypassSubUnlock(targetUrl);
+        } else {
+            return res.status(400).json({ status: "error", message: "Mode tidak dikenal. Pilih: sfl, sub2unlock, sub4unlock" });
+        }
+
         return res.json({
             status: "success",
+            mode: mode,
             original: targetUrl,
             bypass: finalUrl
         });
+
     } catch (err) {
         return res.status(500).json({ status: "error", message: err.message });
     }
